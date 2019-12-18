@@ -17,6 +17,9 @@ lain = { git = "https://github.com/Knight-Ops/lain" }
 fnv = "1"
 ni_rs = { git = "https://github.com/ctfhacker/ni-rs" }
 bitflags = "1"
+smallvec = "0.6"
+ctrlc = "*"
+ctor = "*"
 
 [lib]
 name = "whvp"

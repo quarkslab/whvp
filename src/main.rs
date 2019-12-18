@@ -59,47 +59,47 @@ fn run(plugin: String) -> PyResult<()> {
     addresses.push(return_address);
     let limit = 0;
     let mut cancel = 0;
-    while limit == 0 || result.exits < limit {
-        match emulator.run() {
-            Ok(exit) => {
-                result.exits += 1;
-                match exit.reason {
-                    whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonMemoryAccess => { 
-                        cancel = 0;
-                        result.pages += 1;
-                        let args = (py_emulator, &context, exit.gpa, exit.gva);
-                        memory_access_callback.call(py, args, None)?;
-                    },
-                    whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonException => { 
-                        cancel = 0;
-                        if exit.exception_type == 1 {
-                            result.coverage.push(exit.rip);
-                            if addresses.contains(&exit.rip) {
-                                result.status = 0;
-                                break;
-                            }
-                        }
-                    },
-                    whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonCanceled => { 
-                        cancel += 1;
-                        if cancel > 5 {
-                            result.status = 1;
-                            break;
-                        }
-                    }
-                        _ => {
-                        panic!("Unhandled VM exit reason {}", exit.reason);
-                    }
-                }
-            },
-            _ => {
-                return Err(PyErr::new::<exceptions::Exception, _>("can't run emulator"))
-            }
-        }
-    }
-    if limit != 0 && result.exits > limit {
-        result.status = 3;
-    }
+    // while limit == 0 || result.exits < limit {
+    //     match emulator.run() {
+    //         Ok(exit) => {
+    //             result.exits += 1;
+    //             match exit.reason {
+    //                 whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonMemoryAccess => { 
+    //                     cancel = 0;
+    //                     result.pages += 1;
+    //                     let args = (py_emulator, &context, exit.gpa, exit.gva);
+    //                     memory_access_callback.call(py, args, None)?;
+    //                 },
+    //                 whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonException => { 
+    //                     cancel = 0;
+    //                     if exit.exception_type == 1 {
+    //                         result.coverage.push(exit.rip);
+    //                         if addresses.contains(&exit.rip) {
+    //                             result.status = 0;
+    //                             break;
+    //                         }
+    //                     }
+    //                 },
+    //                 whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonCanceled => { 
+    //                     cancel += 1;
+    //                     if cancel > 5 {
+    //                         result.status = 1;
+    //                         break;
+    //                     }
+    //                 }
+    //                     _ => {
+    //                     panic!("Unhandled VM exit reason {}", exit.reason);
+    //                 }
+    //             }
+    //         },
+    //         _ => {
+    //             return Err(PyErr::new::<exceptions::Exception, _>("can't run emulator"))
+    //         }
+    //     }
+    // }
+    // if limit != 0 && result.exits > limit {
+    //     result.status = 3;
+    // }
 
     fini_func.call1(py, (py_emulator, result))?;
     Ok(())

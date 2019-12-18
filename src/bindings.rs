@@ -1,8 +1,9 @@
 
 use std::convert::TryInto;
 use std::collections::HashSet;
-use std::collections::HashMap;
 use std::time::Duration;
+use std::thread;
+use std::sync::mpsc;
 
 use pyo3::prelude::*;
 use pyo3::exceptions;
@@ -10,13 +11,17 @@ use pyo3::types::*;
 
 use zydis;
 
-use crate::whvp;
+use lain::hexdump;
 
+use crate::whvp;
 use crate::mem;
 use crate::fuzz;
+use crate::watch;
+
+use crate::mem::X64VirtualAddressSpace;
 
 #[pyclass]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Default)]
 pub struct EmulatorExit {
     pub reason: i32,
     pub rip: u64,
@@ -30,6 +35,14 @@ pub struct EmulatorExit {
     pub gpa_unmapped: u32,
     pub gva_valid: u32,
     pub instruction_bytes: [u8; 0x10]
+}
+
+impl From<whvp::ExitContext> for EmulatorExit {
+
+    fn from(_i: whvp::ExitContext) -> EmulatorExit {
+        let exit = EmulatorExit::default();
+        exit
+    } 
 }
 
 #[pymethods]
@@ -96,36 +109,36 @@ impl EmulatorExit {
 impl pyo3::PyObjectProtocol for EmulatorExit {
 
     fn __str__(&self) -> PyResult<String> {
-        let reason = match self.reason {
-            whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonNone =>
-                "None",
-            whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonMemoryAccess =>
-                "MemoryAccess",
-            whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64IoPortAccess =>
-                "IoPortAccess",
-            whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonUnrecoverableException =>
-                "UnrecoverableException",
-            whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonInvalidVpRegisterValue =>
-                "InvalidVpRegisterValue",
-            whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonUnsupportedFeature =>
-                "UnsupportedFeature",
-            whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64InterruptWindow =>
-                "InterruptWindow",
-            whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64Halt =>
-                "Halt",
-            whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64ApicEoi =>
-                "ApicEoi",
-            whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64MsrAccess =>
-                "MsrAccess",
-            whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64Cpuid =>
-                "Cpuid",
-            whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonException =>
-                "Exception",
-            whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonCanceled =>
-                "Canceled",
-            _ => "Invalid"
-        };
-        Ok(format!("vm exit: rip {:x}, reason {}, gva {:x}, gpa {:x}", self.rip, reason, self.gva, self.gpa))
+        // let reason = match self.reason {
+        //     whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonNone =>
+        //         "None",
+        //     whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonMemoryAccess =>
+        //         "MemoryAccess",
+        //     whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64IoPortAccess =>
+        //         "IoPortAccess",
+        //     whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonUnrecoverableException =>
+        //         "UnrecoverableException",
+        //     whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonInvalidVpRegisterValue =>
+        //         "InvalidVpRegisterValue",
+        //     whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonUnsupportedFeature =>
+        //         "UnsupportedFeature",
+        //     whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64InterruptWindow =>
+        //         "InterruptWindow",
+        //     whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64Halt =>
+        //         "Halt",
+        //     whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64ApicEoi =>
+        //         "ApicEoi",
+        //     whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64MsrAccess =>
+        //         "MsrAccess",
+        //     whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64Cpuid =>
+        //         "Cpuid",
+        //     whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonException =>
+        //         "Exception",
+        //     whvp::WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonCanceled =>
+        //         "Canceled",
+        //     _ => "Invalid"
+        // };
+        Ok(format!("vm exit: rip {:x}, gva {:x}, gpa {:x}", self.rip, self.gva, self.gpa))
     }
 
 }
@@ -134,25 +147,25 @@ impl pyo3::PyObjectProtocol for EmulatorExit {
 // FIXME: move this to whvp mod
 // rename to from_whvp_exit_context
 
-impl EmulatorExit {
-    fn from_whvp(exit_context: whvp::WHV_RUN_VP_EXIT_CONTEXT) -> Self {
-        let exit = EmulatorExit {
-            reason: exit_context.ExitReason,
-            rip: exit_context.VpContext.Rip,
-            rflags: exit_context.VpContext.Rflags,
-            exception_type: unsafe { exit_context.__bindgen_anon_1.VpException.ExceptionType },
-            exception_parameter: unsafe { exit_context.__bindgen_anon_1.VpException.ExceptionParameter },
-            error_code: unsafe { exit_context.__bindgen_anon_1.VpException.ErrorCode },
-            gva: unsafe { exit_context.__bindgen_anon_1.MemoryAccess.Gva },
-            gpa: unsafe { exit_context.__bindgen_anon_1.MemoryAccess.Gpa },
-            access_type: unsafe { exit_context.__bindgen_anon_1.MemoryAccess.AccessInfo.__bindgen_anon_1.AccessType() },
-            gpa_unmapped: unsafe { exit_context.__bindgen_anon_1.MemoryAccess.AccessInfo.__bindgen_anon_1.GpaUnmapped() },
-            gva_valid: unsafe { exit_context.__bindgen_anon_1.MemoryAccess.AccessInfo.__bindgen_anon_1.GvaValid() },
-            instruction_bytes: unsafe { exit_context.__bindgen_anon_1.VpException.InstructionBytes }
-        };
-        exit
-    }
-}
+// impl EmulatorExit {
+//     fn from_whvp(exit_context: whvp::WHV_RUN_VP_EXIT_CONTEXT) -> Self {
+//         let exit = EmulatorExit {
+//             reason: exit_context.ExitReason,
+//             rip: exit_context.VpContext.Rip,
+//             rflags: exit_context.VpContext.Rflags,
+//             exception_type: unsafe { exit_context.__bindgen_anon_1.VpException.ExceptionType },
+//             exception_parameter: unsafe { exit_context.__bindgen_anon_1.VpException.ExceptionParameter },
+//             error_code: unsafe { exit_context.__bindgen_anon_1.VpException.ErrorCode },
+//             gva: unsafe { exit_context.__bindgen_anon_1.MemoryAccess.Gva },
+//             gpa: unsafe { exit_context.__bindgen_anon_1.MemoryAccess.Gpa },
+//             access_type: unsafe { exit_context.__bindgen_anon_1.MemoryAccess.AccessInfo.__bindgen_anon_1.AccessType() },
+//             gpa_unmapped: unsafe { exit_context.__bindgen_anon_1.MemoryAccess.AccessInfo.__bindgen_anon_1.GpaUnmapped() },
+//             gva_valid: unsafe { exit_context.__bindgen_anon_1.MemoryAccess.AccessInfo.__bindgen_anon_1.GvaValid() },
+//             instruction_bytes: unsafe { exit_context.__bindgen_anon_1.VpException.InstructionBytes }
+//         };
+//         exit
+//     }
+// }
 
 #[derive(Debug,PartialEq,PartialOrd)]
 pub enum EmulationStatus {
@@ -187,9 +200,9 @@ pub struct Context {
     pub rip: u64
 }
 
-impl From<whvp::EmulatorContext> for Context {
+impl From<whvp::PartitionContext> for Context {
 
-    fn from(context: whvp::EmulatorContext) -> Self {
+    fn from(context: whvp::PartitionContext) -> Self {
         Context {
             rax: unsafe {context.rax.Reg64},
             rbx: unsafe {context.rbx.Reg64},
@@ -275,7 +288,7 @@ impl EmulationResult {
             item.set_item("r15", context.r15)?;
             item.set_item("rflags", context.rflags)?;
             item.set_item("rip", context.rip)?;
-            lst.append(item);
+            lst.append(item)?;
         }
 
         Ok(lst.into())
@@ -293,8 +306,8 @@ impl pyo3::PyObjectProtocol for EmulationResult {
 
 #[pyclass]
 pub struct Emulator {
-    emulator: whvp::Emulator,
-    allocator: whvp::Allocator,
+    partition: whvp::Partition,
+    allocator: mem::Allocator,
     snapshot: mem::GpaManager,
     pub code: u64,
     pub data: u64
@@ -302,8 +315,8 @@ pub struct Emulator {
 
 impl Emulator {
 
-    fn fetch_gpa(&mut self, memory_access_callback: &PyObject, gpa: usize, data: &mut [u8], py: Python) -> PyResult<()> {
-        let args = (gpa,);
+    fn fetch_gpa(&mut self, memory_access_callback: &PyObject, gpa: usize, gva: usize, data: &mut [u8], py: Python) -> PyResult<()> {
+        let args = (gpa, gva);
         let callback_result = memory_access_callback.call(py, args, None)?;
         let bytes = match <PyBytes as PyTryFrom>::try_from(callback_result.as_ref(py)) {
             Ok(bytes) => bytes,
@@ -319,24 +332,25 @@ impl Emulator {
 impl Emulator {
 
     #[new]
-    pub fn new(obj: &PyRawObject) {
-        let emulator = whvp::Emulator::new().unwrap();
-        let allocator = whvp::Allocator::new();
-        let manager = mem::GpaManager::new();
+    pub fn new(obj: &PyRawObject) -> PyResult<()> {
+        let partition = whvp::Partition::new()?;
+        let allocator = mem::Allocator::new();
+        let snapshot = mem::GpaManager::new();
         obj.init({
             Emulator {
-                emulator: emulator,
+                partition: partition,
                 allocator: allocator,
-                snapshot: manager,
+                snapshot: snapshot,
                 code: 0,
                 data: 0,
             }
         });
+        Ok(())
     }
 
     // FIXME: get_regs variant?
     fn get_reg(&mut self, name: &str) -> PyResult<u64> {
-        let context = self.emulator.get_regs().unwrap();
+        let context = self.partition.get_regs()?;
         let value = match name {
             "rax" => Ok(unsafe { context.rax.Reg64 }),
             "rbx" => Ok(unsafe { context.rbx.Reg64 }),
@@ -366,7 +380,7 @@ impl Emulator {
     }
 
     fn set_reg(&mut self, name: &str, value: u64) -> PyResult<()> {
-        let mut context = self.emulator.get_regs().unwrap();
+        let mut context = self.partition.get_regs()?;
         let result = match name {
             "rax" => {
                 context.rax.Reg64 = value;
@@ -466,12 +480,12 @@ impl Emulator {
             },
             _ => Err(PyErr::new::<exceptions::ValueError, _>("invalid register"))
         };
-        self.emulator.set_regs(&context).unwrap();
+        self.partition.set_regs(&context)?;
         result
     }
 
     fn set_table_reg(&mut self, name: &str, base: u64, limit: u16) -> PyResult<()> {
-        let mut context = self.emulator.get_regs().unwrap();
+        let mut context = self.partition.get_regs()?;
         let result = match name {
             "gdt" => {
                 context.gdtr.Table.Base = base;
@@ -485,12 +499,12 @@ impl Emulator {
             },
             _ => Err(PyErr::new::<exceptions::ValueError, _>("invalid register"))
         };
-        self.emulator.set_regs(&context).unwrap();
+        self.partition.set_regs(&context)?;
         result
     }
 
     fn set_segment_reg(&mut self, name: &str, base: u64, limit: u32, long: u16, privilege: u16, selector: u16) -> PyResult<()> {
-        let mut context = self.emulator.get_regs().unwrap();
+        let mut context = self.partition.get_regs()?;
         let result = match name {
             "cs" => {
                 context.cs.Segment.Base = base;
@@ -554,17 +568,17 @@ impl Emulator {
             }, 
             _ => Err(PyErr::new::<exceptions::ValueError, _>("invalid register"))
         };
-        self.emulator.set_regs(&context).unwrap();
+        self.partition.set_regs(&context)?;
         result
     }
 
     fn allocate_physical_memory(&mut self, addr: usize, size: usize) -> PyResult<usize> {
         let pages: usize = self.allocator.allocate_physical_memory(size);
-        let permissions = whvp::WHV_MAP_GPA_RANGE_FLAGS_WHvMapGpaRangeFlagRead |
-            whvp::WHV_MAP_GPA_RANGE_FLAGS_WHvMapGpaRangeFlagWrite |
-            whvp::WHV_MAP_GPA_RANGE_FLAGS_WHvMapGpaRangeFlagExecute;
+        let permissions = whvp::MapGpaRangeFlags::Read |
+            whvp::MapGpaRangeFlags::Write |
+            whvp::MapGpaRangeFlags::Execute;
 
-        match self.emulator.map_physical_memory(addr, pages, size, permissions) {
+        match self.partition.map_physical_memory(addr, pages, size, permissions.bits()) {
             Ok(()) => {
                 return Ok(pages)
             },
@@ -575,7 +589,7 @@ impl Emulator {
     }
 
     fn read_physical_memory(&mut self, addr: usize, size: usize) -> PyResult<PyObject> {
-        let data = self.emulator.read_physical_memory(addr, size);
+        let data = self.partition.read_physical_memory(addr, size);
         match data {
             Ok(slice) => {
                 let gil = Python::acquire_gil();
@@ -589,7 +603,7 @@ impl Emulator {
     }
 
     fn write_physical_memory(&mut self, addr: usize, bytes: &PyBytes) -> PyResult<usize> {
-        match self.emulator.write_physical_memory(addr, bytes.as_bytes()) {
+        match self.partition.write_physical_memory(addr, bytes.as_bytes()) {
             Ok(len) => {
                 return Ok(len)
             },
@@ -600,13 +614,15 @@ impl Emulator {
     }
 
     fn is_physical_memory_valid(&mut self, addr: usize, size: usize) -> bool {
-        self.emulator.is_physical_memory_valid(addr, size)
+        self.partition.is_physical_memory_valid(addr, size)
     }
 
     pub fn run(&mut self) -> PyResult<EmulatorExit> {
-        match self.emulator.run() {
-            Ok(exit_context) => {
-                let exit = EmulatorExit::from_whvp(exit_context);
+        match self.partition.run() {
+            Ok(exit) => {
+                let exit_context: whvp::ExitContext = exit.into();
+                // FIXME: to complete
+                let exit: EmulatorExit = exit_context.into();
                 return Ok(exit)
             },
             _ => {
@@ -628,15 +644,15 @@ impl Emulator {
                         .ok_or(PyErr::new::<exceptions::Exception, _>("can't get coverage_mode"))?
                         .extract()?;
 
-        let mut context = self.emulator.get_regs().unwrap();
-        whvp::set_hw_breakpoint(&mut context, return_address);
-        self.emulator.set_regs(&context).unwrap();
+        let mut context = self.partition.get_regs()?;
 
+        // FIXME: have a struct for tracing mode
         match coverage_mode {
             "no" => {},
             "instrs" => {
-                let rflags = self.get_reg("rflags")?;
-                self.set_reg("rflags", rflags | 0x100)?;
+                let rflags = unsafe { context.rflags.Reg64 };
+                context.rflags.Reg64 = rflags | 0x100;
+                self.partition.set_regs(&context)?;
             },
             "hit" => {},
             "bbl" => {},
@@ -653,67 +669,93 @@ impl Emulator {
                         .ok_or(PyErr::new::<exceptions::Exception, _>("can't get stopping addresses"))?
                         .extract::<Vec<u64>>()?;
 
+        let bp = [0xcc; 1];
+        let cr3 = unsafe { context.cr3.Reg64 };
+        let _ = self.partition.write_gva(cr3, return_address, &bp);
+        for addr in stopping_addresses.iter() {
+            let _ = self.partition.write_gva(cr3, *addr, &bp);
+        }
+
         let decoder = zydis::Decoder::new(zydis::MachineMode::LONG_64, zydis::AddressWidth::_64).unwrap();
-        let display_instructions = false;
+        // FIXME: use args to set this
+        let display_instructions = true;
         let mut cancel = 0;
         while limit == 0 || result.exits < limit {
-            match self.run() {
+            match self.partition.run() {
                 Ok(exit) => {
+                    let exit_context: whvp::ExitContext = exit.into();
                     result.exits += 1;
-                    match whvp::ExitReason::from_bits_unchecked(exit.reason) {
-                        whvp::ExitReason::MEMORY_ACCESS => {
+                    match exit_context {
+                        whvp::ExitContext::MemoryAccess(_vp_context, memory_access_context) => {
                             cancel = 0;
-                            let gpa = exit.gpa;
-                            let gva = exit.gva;
-                            for addr in stopping_addresses.iter() {
-                                let base = addr & !0xfff;
-                                if base <= gva && gva < base + 0x1000 {
-                                    println!("found stopping address {:x}", addr);
-                                }
-                            }
-                            let access_type = exit.access_type;
+                            let gpa = memory_access_context.Gpa;
+                            let gva = memory_access_context.Gva;
+                            
+                            let access_type = memory_access_context.AccessInfo.AccessType;
                             let mut data: [u8; 4096] = [0; 4096];
-                            self.fetch_gpa(&memory_access_callback, gpa as usize, &mut data, py)?;
+                            self.fetch_gpa(&memory_access_callback, gpa as usize, gva as usize, &mut data, py)?;
 
                             let base: usize = (gpa & !0xfff).try_into()?;
                             self.allocate_physical_memory(base, 0x1000)?;
                             
-                            if coverage_mode == "hit" && access_type == whvp::MemoryAccessType::EXECUTE as u32 {
+                            if coverage_mode == "hit" && access_type == whvp::MemoryAccessType::Execute {
                                 let page: &PyBytes = PyBytes::new(py, &[0xcc; 4096]);
                                 self.write_physical_memory(base, page)?;
 
                             } else {
+                                let gva_base = return_address & !0xfff;
+                                let offset: usize = (return_address & 0xfff).try_into()?;
+                                if gva_base <= gva && gva < gva_base + 0x1000 {
+                                    data[offset] = 0xcc;
+                                }
+                                for addr in stopping_addresses.iter() {
+                                    let gva_base = addr & !0xfff;
+                                    let offset: usize = (addr & 0xfff).try_into()?;
+                                    if gva_base <= gva && gva < gva_base + 0x1000 {
+                                        data[offset] = 0xcc;
+                                    }
+                                }
                                 let page: &PyBytes = PyBytes::new(py, &data);
                                 self.write_physical_memory(base, page)?;
-
                             }
 
                             self.snapshot.add_page(base as u64, data);
 
-                            if access_type == whvp::MemoryAccessType::EXECUTE as u32{
+                            if access_type == whvp::MemoryAccessType::Execute {
                                 self.code += 1;
                             } else {
                                 self.data += 1;
                             }
                         },
-                        whvp::ExitReason::EXCEPTION => {
+                        whvp::ExitContext::Exception(vp_context, exception_context) => {
                             cancel = 0;
-                            let rip = exit.rip as usize;
-                            let exception_type = exit.exception_type;
-                            match whvp::ExceptionType::from_bits_unchecked(exception_type) {
-                                whvp::ExceptionType::DEBUG_TRAP_OR_FAULT |
-                                whvp::ExceptionType::BREAKPOINT_TRAP => {
-                                    if coverage_mode == "hit" && exception_type == whvp::ExceptionType::BREAKPOINT_TRAP {
-                                        let paddr = self.emulator.translate_virtual_address(rip)
+                            let rip = vp_context.Rip;
+                            let exception_type: whvp::ExceptionType = exception_context.ExceptionType.into();
+                            if vp_context.ExecutionState.InterruptShadow {
+                                println!("interrupt shadow");
+                                let mut interrupt_context = self.partition.get_regs()?;
+                                unsafe { interrupt_context.interrupt_state.InterruptState.__bindgen_anon_1.set_InterruptShadow(0) };
+                                self.partition.set_regs(&interrupt_context)?;
+                            }
+                            if display_instructions {
+                                let _ = display_buffer(rip, &exception_context.InstructionBytes);
+                            }
+                            match exception_type {
+                                whvp::ExceptionType::DebugTrapOrFault |
+                                whvp::ExceptionType::BreakpointTrap => {
+                                    if coverage_mode == "hit" && exception_type == whvp::ExceptionType::BreakpointTrap {
+                                        let paddr = self.partition.translate_virtual_address(rip as usize)
                                             .map_err(|_| PyErr::new::<exceptions::Exception, _>("can't translate virtual address"))?;
                                         
                                         let mut buffer = [0u8; 16];
+
                                         let cr3 = unsafe { context.cr3.Reg64 };
+
                                         match self.snapshot.read_gva(cr3, rip as u64, &mut buffer) {
                                             Ok(()) => {},
                                             Err(mem::VirtMemError::MissingPage(gpa)) => {
                                                 let mut data: [u8; 4096] = [0; 4096];
-                                                self.fetch_gpa(&memory_access_callback, gpa as usize, &mut data, py)?;
+                                                self.fetch_gpa(&memory_access_callback, gpa as usize, 0, &mut data, py)?;
 
                                                 let base: usize = (gpa & !0xfff).try_into()?;
                                                 let page: &PyBytes = PyBytes::new(py, &[0xcc; 4096]);
@@ -727,22 +769,18 @@ impl Emulator {
                                                 return Err(err.into())
                                             }
                                         }
+                                        if display_instructions {
+                                            let _ = display_buffer(rip, &buffer);
+                                        }
 
                                         let instruction = decoder.decode(&buffer)
                                             .map_err(|_| PyErr::new::<exceptions::Exception, _>("can't decode instruction"))?
                                             .ok_or(PyErr::new::<exceptions::Exception, _>("can't decode instruction"))?;
                                         
-                                        if display_instructions {
-                                            let formatter = zydis::Formatter::new(zydis::FormatterStyle::INTEL).unwrap();
-                                            let mut buffer = [0u8; 200];
-                                            let mut buffer = zydis::OutputBuffer::new(&mut buffer[..]);
-                                            formatter.format_instruction(&instruction, &mut buffer, Some(exit.rip), None).unwrap();
-                                            println!("0x{:016X} {}", exit.rip, buffer);
-                                        }
-
+                                        // FIXME: replace this by self.partition.write_gva(gva, &buffer)
                                         let length = instruction.length as usize;
-                                        let offset = rip & 0xfff;
-                                        let remain = 0x1000 - offset;
+                                        let offset = (rip & 0xfff) as usize;
+                                        let remain = (0x1000 - offset) as usize;
                                         let addr = paddr as usize;
                                         if length <= remain {
                                             let data: &PyBytes = PyBytes::new(py, &buffer[..length]);
@@ -750,42 +788,37 @@ impl Emulator {
                                         } else {
                                             let data: &PyBytes = PyBytes::new(py, &buffer[..remain]);
                                             self.write_physical_memory(addr, data)?;
-                                            let addr = (rip + remain) as usize;
+                                            let addr = (rip + remain as u64) as usize;
                                             let gpa = self.snapshot.translate_gva(cr3, addr as u64)? as usize;
                                             let data: &PyBytes = PyBytes::new(py, &buffer[remain..length]);
                                             self.write_physical_memory(gpa, data)?;
                                         }
-
                                     }
 
-                                    result.coverage.push(exit.rip);
+                                    result.coverage.push(rip as u64);
 
                                     if save_context {
-                                        let context: Context = self.emulator.get_regs().unwrap().into();
+                                        let context: Context = self.partition.get_regs()?.into();
                                         result.context.push(context);
                                     } 
 
-                                    if exit.rip == return_address {
+                                    if rip as u64 == return_address {
                                         result.status = EmulationStatus::Success;
                                         break;
                                     }
 
-                                    if stopping_addresses.contains(&exit.rip) {
+                                    if stopping_addresses.contains(&(rip as u64)) {
                                         result.status = EmulationStatus::ForbiddenAddress;
                                         break;
                                     }
                                 },
-                                whvp::ExceptionType::PAGE_FAULT => {
-                                    result.status = EmulationStatus::UnHandledException;
-                                    break;
-                                }
                                 _ => {
                                     result.status = EmulationStatus::UnHandledException;
                                     break;
                                 }
                             }
                         },
-                        whvp::ExitReason::CANCELED => {
+                        whvp::ExitContext::Canceled(_, _) => {
                             cancel += 1;
                             if cancel > 10 {
                                 println!("stopping, seems stucked");
@@ -794,8 +827,8 @@ impl Emulator {
                             }
 
                         }
-                         _ => {
-                            println!("unhandled vm exit {:x}", exit.reason);
+                        _ => {
+                            println!("unhandled vm exit");
                             result.status = EmulationStatus::UnHandledVmExit;
                             break;
                         }
@@ -814,8 +847,24 @@ impl Emulator {
 
 }
 
+fn display_buffer(rip: u64, buffer: &[u8]) -> PyResult<()> {
+    let decoder = zydis::Decoder::new(zydis::MachineMode::LONG_64, zydis::AddressWidth::_64).unwrap();
+    let instruction = decoder.decode(&buffer)
+        .map_err(|_| PyErr::new::<exceptions::Exception, _>("can't decode instruction"))?
+        .ok_or(PyErr::new::<exceptions::Exception, _>("can't decode instruction"))?;
+
+    let formatter = zydis::Formatter::new(zydis::FormatterStyle::INTEL).unwrap();
+    let mut buffer = [0u8; 200];
+    let mut buffer = zydis::OutputBuffer::new(&mut buffer[..]);
+    formatter.format_instruction(&instruction, &mut buffer, Some(rip as u64), None).unwrap();
+    println!("0x{:016X} {}", rip, buffer);
+    Ok(())
+
+}
+
 #[pyclass]
 pub struct Fuzzer {
+    channel: mpsc::Receiver<Vec<u8>>
 }
 
 #[pymethods]
@@ -823,21 +872,26 @@ impl Fuzzer {
 
     #[new]
     pub fn new(obj: &PyRawObject) {
+        let (tx, rx) = mpsc::channel();
+        let path = ".";
+        let _thread = thread::spawn(move || watch::watch(tx, &path));
+
         obj.init({
             Fuzzer {
+                channel: rx,
             }
         });
     }
 
-    pub fn run(&mut self, py_emulator: PyObject, initial_context: &PyDict, params: &PyDict, memory_access_callback: PyObject, py: Python) -> PyResult<()> {
+    pub fn run(&mut self, py_emulator: PyObject, initial_context: &PyDict, params: &PyDict, memory_access_callback: PyObject, report_callback: PyObject, py: Python) -> PyResult<()> {
         let mut emulator: &mut Emulator = py_emulator.extract(py)?;
 
         let context: &mut PyDict = initial_context.extract()?;
-        self.restore_context(&mut emulator.emulator, context)?;
+        self.restore_context(&mut emulator.partition, context)?;
 
         let params: &PyDict = params.extract()?;
 
-        let mut context = emulator.emulator.get_regs().unwrap();
+        let context = emulator.partition.get_regs()?;
 
         // FIXME: extract from python dict
         let display_duration = Duration::new(1, 0);
@@ -846,25 +900,86 @@ impl Fuzzer {
 
         let mut stats = fuzz::Stats::new(display_duration);
 
-        let mut corpus = fuzz::Corpus::new(0, 2000, 20usize);
+        let mut corpus = fuzz::Corpus::new();
 
         let mut coverage = HashSet::new();
 
+        let cr3 = unsafe { context.cr3.Reg64 };
+
+        let input_size: usize = fuzz_params.input_size.try_into()?;
+
+        println!("executing a first time to map memory");
+        let result = emulator.run_until(&params, memory_access_callback.clone_ref(py), 0, py)?;
+        match result.status {
+            EmulationStatus::Success => {
+            },
+            _ => {
+                return Err(PyErr::new::<exceptions::Exception, _>("first execution failed!"))
+            }
+        }
+        self.restore_mem(&mut emulator)?;
+
+        let mut data = Vec::with_capacity(input_size);
+        data.resize(input_size, 0);
+
+        emulator.partition.read_gva(cr3, fuzz_params.input, &mut data)?;
+
+        let mut new = 0;
+        for addr in result.coverage.iter() {
+            if coverage.insert(*addr) {
+                new += 1;
+            }
+        }
+
+        corpus.add(new, &data);
+        
         loop {
-            let _input = corpus.get_input();
-            // write input with fuzz_params
-            // emulator.write_virtual_memory(fuzz_params.input, &input)
-            // println!("fuzz input is {:?}", input);
-            // FIXME: write data where is needed
-            // match fuzz.mode reg/mem 
+            match self.channel.try_recv() {
+                Ok(data) => {
+                    corpus.worklist.push(data);
+                },
+                _ => {}
+            }
+            
+            let data: Vec<u8> = match corpus.get_next_input() {
+                None => {
+                    println!("no more input, quitting");
+                    break;
+                },
+                Some(data) => {
+                    data
+                }
+            };
+
+            let mut input = corpus.mutate_input(&data);
+            input.truncate(input_size);
+
+            match emulator.partition.write_gva(cr3, fuzz_params.input, &input) {
+                Ok(()) => {
+                },
+                Err(e) => {
+                    println!("can't write fuzzer input {:?}", e);
+                    break;
+                }
+            }
  
-            emulator.emulator.set_regs(&context).unwrap();
+            emulator.partition.set_regs(&context)?;
 
             let result = emulator.run_until(&params, memory_access_callback.clone_ref(py), 0, py)?;
-
-            // save input in corpus
-            // if result is crash
-            // if result is hang
+            match result.status {
+                EmulationStatus::ForbiddenAddress => {
+                    let bytes: &PyBytes = PyBytes::new(py, &input);
+                    let args = (py_emulator.clone_ref(py), bytes);
+                    let callback_result = report_callback.call(py, args, None)?;
+                },
+                EmulationStatus::Stucked => {
+                    println!("hanged");
+                    let crash_context = emulator.partition.get_regs()?;
+                    println!("{}", crash_context);
+                    break;
+                },
+                _ => {}
+            }
 
             stats.iterations += 1;
             stats.total_iterations += 1;
@@ -876,27 +991,30 @@ impl Fuzzer {
                 }
             }
 
+            if new > 0 {
+                corpus.add(new, &input);
+            }
             stats.coverage += new as u64;
             stats.total_coverage = coverage.len() as u64;
 
             stats.code = emulator.code;
             stats.data = emulator.data;
 
-            stats.display();
+            stats.check_display();
 
-            if stats.total_start.elapsed() > fuzz_params.max_duration {
+            if fuzz_params.max_duration.as_secs() != 0 && stats.total_start.elapsed() > fuzz_params.max_duration {
                 break;
             }
 
-            if stats.total_iterations > fuzz_params.max_iterations {
+            if fuzz_params.max_iterations != 0 && stats.total_iterations > fuzz_params.max_iterations {
                 break;
             }
 
             self.restore_mem(&mut emulator)?;
 
-           
         }
 
+        corpus.display();
         Ok(())
 
     }
@@ -936,9 +1054,8 @@ impl Fuzzer {
 
     }
 
-    fn restore_context(&mut self, emulator: &mut whvp::Emulator, context: &PyDict) -> PyResult<bool> {
-        // FIXME: need to convert errors
-        let mut regs = emulator.get_regs().unwrap();
+    fn restore_context(&mut self, partition: &mut whvp::Partition, context: &PyDict) -> PyResult<bool> {
+        let mut regs = partition.get_regs()?;
 
         let value = context.get_item("rax")
                             .ok_or(PyErr::new::<exceptions::Exception, _>("can't get rax"))?
@@ -1145,23 +1262,22 @@ impl Fuzzer {
         }
         regs.gs.Segment.Selector = selector;
 
-        emulator.set_regs(&regs).unwrap();
+        partition.set_regs(&regs)?;
         Ok(true)
     }
 
     fn restore_mem(&mut self, emulator: &mut Emulator) -> PyResult<bool> {
-        let partition = &mut emulator.emulator;
+        let partition = &mut emulator.partition;
         let regions = &mut partition.mapped_regions;
         let mut addresses = regions.iter().map(|region| region.base).collect::<Vec<_>>();
         addresses.sort();
         for addr in addresses.iter() {
-            let bitmap = partition.query_gpa_range(*addr, 0x1000).unwrap();
+            let bitmap = partition.query_gpa_range(*addr, 0x1000)?;
             if bitmap == 1 {
                 if let Some(arr) = emulator.snapshot.pages.get(&(*addr as u64)) {
                     match partition.write_physical_memory(*addr, arr) {
                         Ok(_) => {
-                            // println!("restored {:x}", *addr);
-                            partition.flush_gpa_range(*addr, 0x1000).unwrap();
+                            partition.flush_gpa_range(*addr, 0x1000)?;
                         },
                         _ => {
                             return Err(PyErr::new::<exceptions::ValueError, _>("can't restore data"))
@@ -1174,16 +1290,6 @@ impl Fuzzer {
     }
 }
 
- 
-// #[pyfunction]
-// fn get_capability() -> PyResult<(whvp::BOOL)> {
-//     println!("get capability");
-//     let result = whvp::get_capability();
-//     let mut emulator = whvp::Emulator::new().unwrap();
-//     let _context = emulator.get_regs().unwrap();
-//     Ok(result)
-// }
-
 impl From<mem::VirtMemError> for PyErr {
 
     fn from(err: mem::VirtMemError) -> Self {
@@ -1193,42 +1299,11 @@ impl From<mem::VirtMemError> for PyErr {
 
 }
 
-// #[derive(Debug)]
-// enum BindingError {
-//     WhvpError(String),
-// }
+impl From<whvp::PartitionError> for PyErr {
 
-// impl fmt::Display for BindingError {
+    fn from(err: whvp::PartitionError) -> Self {
+        let msg = format!("{:?}", err);
+        return PyErr::new::<exceptions::Exception, _>(msg);
+    }
 
-//     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-//         write!(f, "{:?}", self)
-//     }
-// }
-
-// impl Error for BindingError {
-//     fn description(&self) -> &str {
-//         "binding error"
-//     }
-
-//     fn cause(&self) -> Option<&dyn Error> {
-//         None
-//     }
-// }
-
-
-// impl From<whvp_sys::EmulatorError> for BindingError {
-//     fn from(err: whvp_sys::EmulatorError) -> Self {
-//         let msg = format!("{:?}", err);
-//         BindingError::WhvpError(msg)
-//     }
-
-// }
-
-// impl From<BindingError> for PyErr {
-
-//     fn from(err: BindingError) -> Self {
-//         let msg = format!("{:?}", err);
-//         return PyErr::new::<exceptions::Exception, _>(msg);
-//     }
-
-// }
+}

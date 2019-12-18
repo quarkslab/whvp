@@ -15,7 +15,7 @@ pub type Gva = u64;
 pub type Gpa = u64;
 
 
-const fn page_off(a: Gpa) -> (Gpa, usize) {
+pub const fn page_off(a: Gpa) -> (Gpa, usize) {
     (a & !0xfff, a as usize & 0xfff)
 }
 
@@ -47,88 +47,43 @@ const fn page_offset(gva: Gva) -> u64 {
     gva & 0xfff
 }
 
-pub struct GpaManager {
-    pub pages: FastMap64<u64, [u8; 4096]>
+pub trait X64VirtualAddressSpace {
 
-}
+    fn read_gpa(&self, gpa: Gpa, buf: &mut [u8]) -> Result<(), VirtMemError>;
 
-impl GpaManager {
+    fn write_gpa(&mut self, gpa: Gpa, data: &[u8]) -> Result<(), VirtMemError>;
 
-    pub fn new() -> Self {
-        GpaManager {
-            pages: FastMap64::default(),
-        }
-    }
-
-    pub fn add_page(&mut self, gpa: Gpa, page: [u8; 4096]) {
-        let (base, _) = page_off(gpa);
-        self.pages.insert(base, page);
-    }
-
-    pub fn del_page(&mut self, gpa: Gpa) {
-        let (base, _) = page_off(gpa);
-        self.pages.remove(&base);
-    }
-
-    pub fn read_gpa_u64(&self, gpa: Gpa) -> Result<u64, VirtMemError> {
+    fn read_gpa_u64(&self, gpa: Gpa) -> Result<u64, VirtMemError> {
         let mut buf = [0; mem::size_of::<u64>()];
         self.read_gpa(gpa, &mut buf)?;
         Ok(u64::from_le_bytes(buf))
     }
 
-    pub fn read_gpa(&self, gpa: Gpa, buf: &mut [u8]) -> Result<(), VirtMemError> {
-        if gpa + (buf.len() as Gpa) > (gpa & !0xfff) + 0x1000 {
-            return Err(VirtMemError::SpanningPage);
-        }
-
-        let (base, off) = page_off(gpa);
-        match self.pages.get(&base) {
-            Some(arr) => {
-                return Ok(buf.copy_from_slice(&arr[off..off + buf.len()]))
-            },
-            None => return Err(VirtMemError::MissingPage(base))
-        }
-    }
-
-    pub fn write_gpa(&mut self, gpa: Gpa, data: &[u8]) -> Result<(), VirtMemError> {
-        if gpa + (data.len() as Gpa) > (gpa & !0xfff) + 0x1000 {
-            return Err(VirtMemError::SpanningPage);
-        }
-
-        let (base, off) = page_off(gpa);
-        self.pages.entry(base).and_modify(|page| {
-            let dst = &mut page[off..off + data.len()];
-            dst.copy_from_slice(data);
-        });
-
-        Ok(())
-    }
-
-    pub fn read_gva_u64(&self, cr3: Gpa, gva: Gva) -> Result<u64, VirtMemError> {
+    fn read_gva_u64(&self, cr3: Gpa, gva: Gva) -> Result<u64, VirtMemError> {
         let mut buf = [0; mem::size_of::<u64>()];
         self.read_gva(cr3, gva, &mut buf)?;
         Ok(u64::from_le_bytes(buf))
     }
 
-    pub fn read_gva_u32(&self, cr3: Gpa, gva: Gva) -> Result<u32, VirtMemError> {
+    fn read_gva_u32(&self, cr3: Gpa, gva: Gva) -> Result<u32, VirtMemError> {
         let mut buf = [0; mem::size_of::<u32>()];
         self.read_gva(cr3, gva, &mut buf)?;
         Ok(u32::from_le_bytes(buf))
     }
 
-    pub fn read_gva_u16(&self, cr3: Gpa, gva: Gva) -> Result<u16, VirtMemError> {
+    fn read_gva_u16(&self, cr3: Gpa, gva: Gva) -> Result<u16, VirtMemError> {
         let mut buf = [0; mem::size_of::<u16>()];
         self.read_gva(cr3, gva, &mut buf)?;
         Ok(u16::from_le_bytes(buf))
     }
 
-    pub fn read_gva_u8(&self, cr3: Gpa, gva: Gva) -> Result<u8, VirtMemError> {
+    fn read_gva_u8(&self, cr3: Gpa, gva: Gva) -> Result<u8, VirtMemError> {
         let mut buf = [0; mem::size_of::<u8>()];
         self.read_gva(cr3, gva, &mut buf)?;
         Ok(u8::from_le_bytes(buf))
     }
 
-    pub fn read_gva(&self, cr3: Gpa, gva: Gva, buf: &mut [u8]) -> Result<(), VirtMemError> {
+    fn read_gva(&self, cr3: Gpa, gva: Gva, buf: &mut [u8]) -> Result<(), VirtMemError> {
         let mut off = 0;
 
         for (start, sz) in chunked(gva, buf.len()) {
@@ -140,7 +95,7 @@ impl GpaManager {
         Ok(())
     }
 
-    pub fn write_gva(&mut self, cr3: Gpa, gva: Gva, buf: &[u8]) -> Result<(), VirtMemError> {
+    fn write_gva(&mut self, cr3: Gpa, gva: Gva, buf: &[u8]) -> Result<(), VirtMemError> {
         let mut off = 0;
 
         for (start, sz) in chunked(gva, buf.len()) {
@@ -152,7 +107,7 @@ impl GpaManager {
         Ok(())
     }
 
-    pub fn translate_gva(&self, cr3: Gpa, gva: Gva) -> Result<Gpa, VirtMemError> {
+    fn translate_gva(&self, cr3: Gpa, gva: Gva) -> Result<Gpa, VirtMemError> {
         let (pml4_base, _) = base_flags(cr3);
 
         let pml4e_addr = pml4_base + pml4_index(gva) * 8;
@@ -176,8 +131,10 @@ impl GpaManager {
         // huge pages:
         // 7 (PS) - Page size; must be 1 (otherwise, this entry references a page
         // directory; see Table 4-1
-        if pdpte_flags & 1 << 7 != 0 {
-            return Ok((pdpte & 0xffff_ffff_c000_0000) + (gva & 0x3fff_ffff));
+        if pdpte_flags & (1 << 7) != 0 {
+            // let res = (pdpte & 0xffff_ffff_c000_0000) + (gva & 0x3fff_ffff);
+            let res = pd_base + (gva & 0x3fff_ffff);
+            return Ok(res)
         }
 
         let pde_addr = pd_base + pd_index(gva) * 8;
@@ -192,8 +149,10 @@ impl GpaManager {
         // large pages:
         // 7 (PS) - Page size; must be 1 (otherwise, this entry references a page
         // table; see Table 4-18
-        if pde_flags & 1 << 7 != 0 {
-            return Ok((pde & 0xffff_ffff_ffe0_0000) + (gva & 0x1f_ffff));
+        if pde_flags & (1 << 7) != 0 {
+            // let res = (pde & 0xffff_ffff_ffe0_0000) + (gva & 0x1f_ffff);
+            let res = pt_base + (gva & 0x1f_ffff);
+            return Ok(res)
         }
 
         let pte_addr = pt_base + pt_index(gva) * 8;
@@ -207,57 +166,97 @@ impl GpaManager {
 
         Ok(pte_paddr + page_offset(gva))
     }
+}
+
+pub struct Allocator {
+    pages: Vec<(usize, usize)>,
+}
+
+impl Allocator {
+    pub fn new() -> Self {
+        let allocator = Allocator {
+            pages: Vec::new()
+        };
+        allocator
+    }
+
+    pub fn allocate_physical_memory(&mut self, size: usize) -> usize {
+        let layout = std::alloc::Layout::from_size_align(size, 4096).unwrap();
+        let ptr = unsafe { std::alloc::alloc(layout) };
+        let addr = ptr as usize;
+        self.pages.push((addr, size));
+        addr
+    }
+}
+
+impl Drop for Allocator {
+    fn drop(&mut self) {
+        println!("destructing allocator");
+        for &(addr, size) in &self.pages {
+            let layout = std::alloc::Layout::from_size_align(size, 4096).unwrap();
+            let ptr = addr as *mut u8;
+            unsafe { std::alloc::dealloc(ptr, layout) };
+        }
+    }
+}
 
 
+pub struct GpaManager {
+    pub pages: FastMap64<u64, [u8; 4096]>
 
 }
 
-// pub struct SyncUnsafeCell<T>(pub UnsafeCell<T>);
-// unsafe impl<T> Sync for SyncUnsafeCell<T> {}
+impl GpaManager {
 
-// impl<T> SyncUnsafeCell<T> {
-    // pub fn new(a: T) -> Self {
-        // Self(UnsafeCell::new(a))
-    // }
-// }
+    pub fn new() -> Self {
+        GpaManager {
+            pages: FastMap64::default(),
+        }
+    }
 
-// #[ctor]
-// static FAULT: SyncUnsafeCell<Box<dyn FnMut(PhyAddress)>> =
-    // { SyncUnsafeCell::new(Box::new(|_| panic!("no missing_page function set"))) };
+    pub fn add_page(&mut self, gpa: Gpa, page: [u8; 4096]) {
+        let (base, _) = page_off(gpa);
+        self.pages.insert(base, page);
+    }
 
-// pub type FastMap64<K, V> = HashMap<K, V, BuildHasherDefault<FnvHasher>>;
+    pub fn del_page(&mut self, gpa: Gpa) {
+        let (base, _) = page_off(gpa);
+        self.pages.remove(&base);
+    }
 
-// #[ctor]
-// pub static MEM: SyncUnsafeCell<FastMap64<PhyAddress, *mut u8>> =
-//     { SyncUnsafeCell::new(FastMap64::default()) };
+}
 
-// unsafe fn mem() -> &'static mut FastMap64<PhyAddress, *mut u8> {
-//     &mut (*(MEM.0.get()))
-// }
+impl X64VirtualAddressSpace for GpaManager {
 
-// pub unsafe fn missing_page<T: FnMut(PhyAddress) + 'static>(f: T) {
-//     *(FAULT.0.get()) = Box::new(f);
-// }
+    fn read_gpa(&self, gpa: Gpa, buf: &mut [u8]) -> Result<(), VirtMemError> {
+        if gpa + (buf.len() as Gpa) > (gpa & !0xfff) + 0x1000 {
+            return Err(VirtMemError::SpanningPage);
+        }
 
-// pub unsafe fn fault(gpa: PhyAddress) {
-//     let f = FAULT.0.get();
-//     (**f)(gpa);
-// }
+        let (base, off) = page_off(gpa);
+        match self.pages.get(&base) {
+            Some(arr) => {
+                return Ok(buf.copy_from_slice(&arr[off..off + buf.len()]))
+            },
+            None => return Err(VirtMemError::MissingPage(base))
+        }
+    }
 
-// pub unsafe fn resolve_hva(gpa: PhyAddress) -> *mut u8 {
-//     let (page, off) = page_off(gpa);
-//     (*(mem().get(&page).unwrap())).add(off)
-// }
+    fn write_gpa(&mut self, gpa: Gpa, data: &[u8]) -> Result<(), VirtMemError> {
+        if gpa + (data.len() as Gpa) > (gpa & !0xfff) + 0x1000 {
+            return Err(VirtMemError::SpanningPage);
+        }
 
-// pub unsafe fn resolve_hva_checked(gpa: PhyAddress) -> Option<*mut u8> {
-//     let (page, off) = page_off(gpa);
+        let (base, off) = page_off(gpa);
+        self.pages.entry(base).and_modify(|page| {
+            let dst = &mut page[off..off + data.len()];
+            dst.copy_from_slice(data);
+        });
 
-//     match mem().get(&page) {
-//         Some(p) => Some(p.add(off)),
-//         None => None,
-//     }
-// }
+        Ok(())
+    }
 
+}
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum VirtMemError {
