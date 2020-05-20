@@ -1,0 +1,32 @@
+[package]
+name = "whvp-py"
+version = "0.1.0"
+authors = ["Damien Aumaitre <daumaitre@quarkslab.com>"]
+edition = "2018"
+
+[dependencies]
+whvp-core = { path = "../whvp-core" }
+zydis = "3.0"
+ctrlc = "3.1.4"
+ctor = "0.1.13"
+log = "0.4.8"
+simple_logger = "1.6.0"
+custom_debug_derive = "0.2.0"
+thiserror = "1.0.14"
+anyhow = "1.0.28"
+
+[lib]
+name = "whvp"
+crate-type = ["cdylib"]
+
+[dependencies.pyo3]
+version = "0.8.2"
+features = ["extension-module"]
+
+[package.metadata.maturin]
+requires-dist = ["click", "rpyc", "colorama", "pykd"]
+
+[package.metadata.maturin.scripts]
+whvp-fuzzer = "whvp.scripts.fuzzer:cli"
+whvp-tracer = "whvp.scripts.tracer:cli"
+whvp-triage = "whvp.scripts.triage:cli"
