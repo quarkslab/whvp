@@ -1,5 +1,9 @@
-/target
+target
 **/*.rs.bk
 Cargo.lock
 __pycache__
+*.pyd
 tmp
+setenv.ps1
+.vscode
+.pytest_cache

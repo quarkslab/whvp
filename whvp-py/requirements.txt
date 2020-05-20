@@ -1,0 +1,6 @@
+pytest
+maturin
+
+click
+pykd
+rpyc
