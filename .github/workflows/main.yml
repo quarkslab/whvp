@@ -19,7 +19,8 @@ jobs:
       env:
         RUST_VERSION: nightly-2020-05-19
       run: |
-        rustup update $RUST_VERSION && rustup default $RUST_VERSION
+        rustup update $RUST_VERSION
+        rustup default $RUST_VERSION
         rustc --version
         rustup toolchain list
 
