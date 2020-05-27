@@ -1,18 +1,34 @@
 # README
 
-This tool is a PoC for a snapshot-based coverage-guided fuzzer for targetting Windows kernel.
+This tool is a PoC for a snapshot-based coverage-guided fuzzer targetting Windows kernel components.
+
 The idea is to clone the state of a running kernel (cpu and memory) into an Hyper-V partition to execute a specific function.
 A targeted small virtual machine is obtained by mapping the requested code and data needed to run this function. The state is read from a snapshot obtained from a kernel debugger.
-This small vm is then used to perform various tasks useful for a vulnerability researcher like getting an execution trace for the targeted function or fuzzing user-controlled inputs.
+This small VM is then used to perform various tasks useful for a vulnerability researcher like getting an execution trace for the targeted function or fuzzing user-controlled inputs.
 
 It leverages WHVP (Windows Hypervisor Platform) API to provide access to a Hyper-V partition.
 See https://docs.microsoft.com/en-us/virtualization/api/hypervisor-platform/hypervisor-platform for more details.
 
 ## Installation
 
-You need to enable WHVP (Windows Hypervisor Platform) first.
+WHVP (Windows Hypervisor Platform) must be enabled.
 
-A python wheel is provided in the releases section
+In a elevated powershell session, use the following command to check if WHVP is enabled:
+
+```
+Get-WindowsOptionalFeature -FeatureName HypervisorPlatform -Online
+
+FeatureName      : HypervisorPlatform
+DisplayName      : Windows Hypervisor Platform
+Description      : Enables virtualization software to run on the Windows hypervisor
+RestartRequired  : Possible
+State            : Enabled
+CustomProperties :
+```
+
+### Python wheel
+
+A python wheel is provided in the releases section.
 So the installation is quite straightforward:
 
 ```
@@ -25,6 +41,8 @@ $ .\venv\Scripts\activate
 
 $ pip install whvp_py-0.1.0-cp37-none-win_amd64.whl
 ```
+
+### Source
 
 If you prefer to build from source, you need to proceed as follows.
 
@@ -60,7 +78,7 @@ Then with `maturin` you can either build locally with:
 $ maturin develop
 ```
 
-Or build a wheel for easy installation
+Or build Python wheels for easy installation
 
 ```
 $ maturin build --release
@@ -85,6 +103,7 @@ running rpyc server
 ```
 
 The second type of snapshot use also `pykd` to make dump a valid context from a Windbg instance.
+To use it you need to launch the `pykd_dump_context.py` script in your Windbg instance.
 
 ```
 kd> !load pykd
@@ -95,7 +114,13 @@ kd> !py -3 -g [path]\pykd_dump_context.py [directory]
 The first type of snapshot is more adapted for a dynamic approach (when you are searching for a potential function to fuzz).
 Once you find a potential candidate, use the second snapshot to make a dump. You will be able to use your debugger for another task.
 
-3 scripts are provided.
+A snapshot consists of 3 files:
+
+- `context.json`: initial cpu state
+- `params.json`: tracer parameters (expected return address, excluded addresses)
+- `mem.dmp`: Windbg dump file
+
+3 tools are provided.
 
 The first one is a tracer `whvp-tracer` (located in `whvp/whvp-py/scripts/tracer.py`)
 
@@ -113,6 +138,16 @@ Options:
 ```
 
 Its goal is to execute a target function in a Hyper-V partition and save an execution trace if needed.
+
+You have several possibilities for obtaining the coverage:
+
+- `no`: no coverage is used, the function is executed until the processor hits the expected return address
+- `hit`: when pages containing code are mapped in the Hyper-V partition, instructions are replaced with software breakpoints and will be restored when they are executed for the first time. As a result you'll have the coverage on unique addresses.
+- `instrs`: TF (Trap Flag) is enabled in `rflags` and each instruction will trigger an interruption from the virtual processor. As a result you'll have a full coverage of every instructions executed.
+
+The trace can be saved into a `json` file for further processing or analysis.
+You can choose to record only the encountered addresses or the full processor context.
+You can also replay a specific input (for example found by the fuzzer).
 
 ```
 $ python .\whvp\scripts\tracer.py --coverage instrs
@@ -208,8 +243,19 @@ $ python .\whvp\scripts\triage.py --snapshot [path] .\fuzz\7ea6bb7e-167e-4ca0-92
 2020-05-20 16:44:07,204 DEBUG [whvp_core::whvp] destructing partition
 ```
 
-## Limitations
+## Known Bugs/Limitations
 
-- This software is in a very early stage of development
-- Sometimes the tracer is unable to gather a correct trace
-- To have best performances, it's better to target specific functions. VM exits are really costly, so is the snapshot restoration.
+- This software is in a very early stage of development and an ongoing experiment.
+- Sometimes the tracer is unable to trace the target function (most common issue is invalid virtual cpu state).
+- When using `hit` coverage mode, the tracer will misbehave on some functions (it is the case with some switch tables). The reason is that each byte is replaced by software breakpoints (including data if they are present in a executable page).
+- The target function will be executed with a unique virtual processor, you have no support for hardware or OS interrupts. As a result, it will not be interrupted (so no support for asynchronous code).
+- This tool is best used for targetting small synchronous functions.
+- To have best performances, minimize VM exits and modified pages because they can be really costly and will increase the time needed to execute the function. 
+
+## License
+
+This tool is currently developed and sponsored by Quarkslab under the Apache 2.0 license.
+
+## Greetz
+
+Hail to @yrp604, @0vercl0k, Alexandre Gazet for their help, feedbacks and thoughts. Thanks also to all my colleagues at Quarkslab!

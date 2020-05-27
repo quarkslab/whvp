@@ -1,7 +1,7 @@
 
 import os
 import json
-import itertools
+import collections
 import shutil
 import hashlib
 
@@ -98,61 +98,24 @@ def cli(crashes, output, snapshot, limit):
 
         coverages[f] = coverage
 
-    duplicates = {}
-    if len(files) >= 1:
-        f = files[0]
-        duplicates[f] = set([])
+    buckets = collections.defaultdict(list)
 
-    combinations = list(itertools.combinations(files, 2))
-    whvp.log(F"{len(combinations)} comparaison(s) to do")
-    for index, (f, g) in enumerate(combinations):
-        cov_f = coverages[f]["coverage"]
-        cov_g = coverages[g]["coverage"]
-
-        if cov_f[-limit:] != cov_g[-limit:]:
-            continue
-
-        if f not in duplicates and g not in duplicates:
-            found = None
-            for k, v in duplicates.items():
-                if f in v or g in v:
-                    found = k
-            if found is None:
-                duplicates[f] = set([])
-                duplicates[f].add(g)
-            else:
-                duplicates[found].add(f)
-                duplicates[found].add(g)
-
-        elif f in duplicates and g not in duplicates:
-            l = duplicates[f]
-            l.add(g)
-        elif f not in duplicates and g in duplicates:
-            l = duplicates[g]
-            l.add(f)
-        else:
-            duplicates[f].add(g)
-
-    whvp.log(F"triaged {len(files)} crash(es)")
-    whvp.log(F"found {len(duplicates)} unique crash(es)")
-    for bucket, duplicates in duplicates.items():
-        whvp.log(F"{bucket} has {len(duplicates)} duplicate(s)")
-
+    for f in files:
         m = hashlib.sha1()
-        for (address, context) in coverages[bucket]["coverage"][-limit:]:
+        for (address, context) in coverages[f]["coverage"][-limit:]:
             data = F"{address:016x}"
             m.update(bytes(data, encoding="utf-8"))
 
-        filename = m.hexdigest()
+        bucket = m.hexdigest()
+        buckets[bucket].append(f)
 
-        bucket_path = os.path.join(buckets_dir, filename)
+    whvp.log(F"triaged {len(files)} crash(es)")
+    whvp.log(F"found {len(buckets)} unique crash(es)")
+    for bucket, duplicates in buckets.items():
+        whvp.log(F"bucket {bucket} contains {len(duplicates)} file(s)")
+
+        bucket_path = os.path.join(buckets_dir, bucket)
         os.makedirs(bucket_path, exist_ok=True)
-
-        src = os.path.join(crashes, bucket)
-        shutil.copy(src, bucket_path)
-
-        src = os.path.join(crashes, os.path.splitext(bucket)[0] + ".json")
-        shutil.copy(src, bucket_path)
 
         for d in duplicates:
             src = os.path.join(crashes, d)
