@@ -286,15 +286,18 @@ pub struct Fuzzer {
 }
 
 impl Fuzzer {
-    pub fn new(path: &str) -> Result<Self> {
+    // FIXME: https://www.philipdaniels.com/blog/2019/rust-api-design/
+    pub fn new<S>(path: S) -> Result<Self>
+    where S: Into<String> {
         let (tx, rx) = mpsc::channel();
-        let copy = String::from(path);
-        let _thread = thread::spawn(move || watch::watch(tx, &copy));
 
         let fuzzer = Fuzzer {
-            path: path.to_string(),
+            path: path.into(),
             channel: rx,
         };
+
+        let copy = fuzzer.path.clone();
+        let _thread = thread::spawn(move || watch::watch(tx, &copy));
 
         Ok(fuzzer)
     }

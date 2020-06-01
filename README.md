@@ -1,6 +1,6 @@
 # README
 
-This tool is a PoC for a snapshot-based coverage-guided fuzzer targetting Windows kernel components.
+This tool is a PoC for a snapshot-based coverage-guided fuzzer targeting Windows kernel components.
 
 The idea is to clone the state of a running kernel (cpu and memory) into an Hyper-V partition to execute a specific function.
 A targeted small virtual machine is obtained by mapping the requested code and data needed to run this function. The state is read from a snapshot obtained from a kernel debugger.

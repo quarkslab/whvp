@@ -374,6 +374,7 @@ impl<'source> pyo3::FromPyObject<'source> for TraceParams {
             ))?
             .extract::<u64>()?;
 
+        // FIXME: optional parameter
         params.limit = dict
             .get_item("limit")
             .ok_or(PyErr::new::<exceptions::Exception, _>(
@@ -381,6 +382,7 @@ impl<'source> pyo3::FromPyObject<'source> for TraceParams {
             ))?
             .extract::<u64>()?;
 
+        // FIXME: optional parameter
         params.save_context = dict
             .get_item("save_context")
             .ok_or(PyErr::new::<exceptions::Exception, _>(
@@ -398,6 +400,7 @@ impl<'source> pyo3::FromPyObject<'source> for TraceParams {
         params.coverage_mode = trace::CoverageMode::from_str(coverage_mode)
             .map_err(|e| PyErr::new::<exceptions::Exception, _>(format!("invalid coverage mode {}", e)))?;
 
+        // FIXME: optional parameter
         params.save_instructions = dict
             .get_item("save_instructions")
             .ok_or(PyErr::new::<exceptions::Exception, _>(
@@ -411,6 +414,12 @@ impl<'source> pyo3::FromPyObject<'source> for TraceParams {
                 "can't get excluded addresses",
             ))?
             .extract()?;
+
+        let max_duration = dict .get_item("max_duration");
+        if let Some(duration) = max_duration {
+            params.max_duration = Duration::new(duration.extract()?, 0);
+
+        }
 
         Ok(TraceParams(params))
     }

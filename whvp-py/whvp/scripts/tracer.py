@@ -9,6 +9,7 @@ from whvp import helpers
 from whvp.snapshot import RpycSnapshot, DumpSnapshot
 
 
+# FIXME: max_time should be a float
 @click.command()
 @click.option("--snapshot", default="localhost:18861", show_default=True)
 @click.option("--coverage", type=click.Choice(["no", "hit", "instrs"]), default="no", show_default=True)
@@ -16,7 +17,8 @@ from whvp.snapshot import RpycSnapshot, DumpSnapshot
 @click.option("--save-instructions", is_flag=True, show_default=True)
 @click.option("--save-trace")
 @click.option("--replay")
-def cli(snapshot, coverage, save_context, save_instructions, save_trace, replay):
+@click.option("--max-time", type=int, default=0, show_default=True)
+def cli(snapshot, coverage, save_context, save_instructions, save_trace, replay, max_time):
     whvp.init_log()
 
     if ":" in snapshot:
@@ -38,6 +40,8 @@ def cli(snapshot, coverage, save_context, save_instructions, save_trace, replay)
     params["coverage"] = coverage
     params["save_context"] = save_context
     params["save_instructions"] = save_instructions
+    if max_time != 0:
+        params["max_time"] = max_time
 
     whvp.log("running tracer")
     trace = tracer.run(params)

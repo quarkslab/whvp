@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use std::io::{BufWriter, Write};
 
-use std::time::Instant;
+use std::time::{Instant, Duration};
 
 use std::convert::TryInto;
 
@@ -111,6 +111,7 @@ impl FromStr for CoverageMode {
 pub struct Params {
     #[serde(skip)]
     pub limit: u64,
+    pub max_duration: Duration,
     pub return_address: u64,
     pub excluded_addresses: HashMap<String, u64>,
     #[serde(skip)]
@@ -654,6 +655,10 @@ impl <S: Snapshot + mem::X64VirtualAddressSpace> Tracer for WhvpTracer <S> {
         while params.limit == 0 || exits < params.limit {
             let exit = self.partition.run()?;
             exits += 1;
+            if params.max_duration != Duration::default() && trace.start.unwrap().elapsed() > params.max_duration {
+                trace.status = EmulationStatus::Timeout;
+                break;
+            }
             let exit_context: whvp::ExitContext = exit.into();
             match exit_context {
                 whvp::ExitContext::MemoryAccess(_vp_context, memory_access_context) => {
