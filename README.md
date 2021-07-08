@@ -1,5 +1,7 @@
 # README
 
+**This project is not in development anymore, it has been replaced by https://github.com/quarkslab/rewind**
+
 This tool is a PoC for a snapshot-based coverage-guided fuzzer targeting Windows kernel components.
 
 The idea is to clone the state of a running kernel (cpu and memory) into an Hyper-V partition to execute a specific function.
